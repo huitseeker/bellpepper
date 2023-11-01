@@ -27,7 +27,7 @@ pub struct TestConstraintSystem<Scalar: PrimeField> {
     aux: Vec<(Scalar, String)>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct OrderedVariable(Variable);
 
 impl Eq for OrderedVariable {}
@@ -424,10 +424,73 @@ impl<Scalar: PrimeField> ConstraintSystem<Scalar> for TestConstraintSystem<Scala
 
 #[cfg(test)]
 mod tests {
+    use crate::num::AllocatedNum;
+
     use super::*;
 
     use blstrs::Scalar as Fr;
     use ff::Field;
+    use rand_core::{SeedableRng, RngCore};
+    use rand_xorshift::XorShiftRng;
+
+
+    // Auxiliary function for creating a random linear combination
+    fn random_lc_strategy(cs: &mut impl ConstraintSystem<Fr>, n: usize) -> LinearCombination<Fr> {
+        let mut coeffs = vec![0; n];
+        let mut rng = XorShiftRng::from_seed([0u8; 16]);
+        coeffs.fill_with(|| rng.next_u64());
+
+        let vars = (0..8).map(|i| {
+                AllocatedNum::alloc(cs.namespace(|| format!("{i}")), || Ok(Fr::ZERO)).unwrap()
+        }).collect::<Vec<_>>();
+
+        let mut lc = LinearCombination::zero();
+        for coeff in coeffs.iter() {
+            let i = (rng.next_u32() >> 29) as usize;
+            
+            let var = vars[i].get_variable();
+            let val = Fr::from(*coeff);
+            lc = lc + (val, var);
+        }
+        lc
+    }
+
+    fn old_proc_lc<Scalar: PrimeField>(
+        terms: &LinearCombination<Scalar>,
+    ) -> BTreeMap<OrderedVariable, Scalar> {
+        let mut map = BTreeMap::new();
+        for (var, &coeff) in terms.iter() {
+            map.entry(OrderedVariable(var))
+                .or_insert_with(|| Scalar::ZERO)
+                .add_assign(&coeff);
+        }
+    
+        // Remove terms that have a zero coefficient to normalize
+        let mut to_remove = vec![];
+        for (var, coeff) in map.iter() {
+            if coeff.is_zero().into() {
+                to_remove.push(*var)
+            }
+        }
+    
+        for var in to_remove {
+            map.remove(&var);
+        }
+    
+        map
+    }
+
+    #[test]
+    fn test_proc_lc_equivalent() {
+        for _i in 1..1000 {
+            let mut cs = TestConstraintSystem::<Fr>::new();
+            let lc = random_lc_strategy(&mut cs, 1000);
+            
+            let old_map = old_proc_lc(&lc);
+            let new_map = proc_lc(&lc);
+            assert_eq!(old_map, new_map);
+        }
+    }
 
     #[test]
     fn test_compute_path() {
